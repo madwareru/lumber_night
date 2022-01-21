@@ -6,8 +6,11 @@ mod alloc;
 mod wasm4;
 
 mod tile;
-mod random;
+mod sprites;
+mod objects;
+mod tilemap;
 mod game_stage;
+mod random;
 
 use std::sync::{Mutex};
 
