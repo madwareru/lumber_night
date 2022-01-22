@@ -1,8 +1,12 @@
 use std::cmp::Ordering;
+use std::collections::VecDeque;
 use crate::objects::{Object};
 use crate::random::RndGen;
 use crate::tilemap::Tilemap;
 use super::wasm4::*;
+use bitsetium::{BitSearch, BitEmpty, BitSet, BitIntersection, BitUnion, BitTestNone, BitTest};
+
+type PassabilitySet = [u8; 200];
 
 const OBJECTS: [(Object, (i16, i16));114] = [
     (Object::Pine, (12,4)),
@@ -171,8 +175,17 @@ struct EcsWorld {
     pub dead_tree_archetype: Vec<((i16, i16), )>,
 }
 
+#[derive(Copy, Clone)]
+#[repr(u8)]
+enum Direction { None, Up, Down, Left, Right }
+
 pub struct GameStage {
     rnd_gen: RndGen,
+    obstacles: PassabilitySet,
+    visited_fields: PassabilitySet,
+    path_buffer: [Direction; 40*40],
+    path_queue: VecDeque<((u8, u8), Direction)>,
+    mouse_path: Vec<Direction>,
     current_frame: usize,
     ecs_world: EcsWorld,
     tilemap: Tilemap,
@@ -183,6 +196,11 @@ impl GameStage {
     pub fn new() -> Self {
         GameStage {
             rnd_gen: RndGen::new(),
+            obstacles: PassabilitySet::empty(),
+            visited_fields: PassabilitySet::empty(),
+            path_buffer: [Direction::None; 40*40],
+            path_queue: VecDeque::with_capacity(1024),
+            mouse_path: Vec::new(),
             ecs_world: EcsWorld {
                 workers_archetype: Vec::new(),
                 ripples_archetype: Vec::new(),
@@ -230,10 +248,23 @@ impl GameStage {
         for j in 0..40 {
             for i in 0..40 {
                 let idx = ((j / 2) * 21 + i / 2) as usize;
-                if self.tilemap.map[idx] == 1 &&
-                    self.tilemap.map[idx + 1] == 1 &&
-                    self.tilemap.map[idx + 21] == 1 &&
-                    self.tilemap.map[idx + 22] == 1 { continue; }
+
+                let mut obstacle_offset = 0;
+                if j % 2 != 0 { obstacle_offset += 21; }
+                if i % 2 != 0 { obstacle_offset += 1; }
+
+                if self.tilemap.map[idx + obstacle_offset] == 0 {
+                    self.obstacles.set(j as usize * 40 + i as usize);
+                } else {
+                    continue;
+                }
+
+                // if self.tilemap.map[idx] == 1 &&
+                //     self.tilemap.map[idx + 1] == 1 &&
+                //     self.tilemap.map[idx + 21] == 1 &&
+                //     self.tilemap.map[idx + 22] == 1 {
+                //     continue;
+                // }
 
                 if last_set {
                     last_set = false;
@@ -257,6 +288,14 @@ impl GameStage {
         for &(object, (x, y)) in OBJECTS.iter() {
             match object {
                 Object::BigHouse => {
+                    let yy = (y / 4) as usize;
+                    let xx = (x / 4) as usize;
+                    for j in yy - 2 .. yy + 4 {
+                        for i in xx - 2 .. xx + 4 {
+                            let passability_tile_idx = j * 40 + i;
+                            self.obstacles.set(passability_tile_idx);
+                        }
+                    }
                     self.ecs_world.store_house_archetype.push(
                         ((x, y), StoreHouse { count_items: 0 })
                     );
@@ -273,6 +312,9 @@ impl GameStage {
                     );
                 }
                 _ => {
+                    let passability_tile_idx = ((y / 4) as usize * 40 + (x / 4) as usize);
+                    self.obstacles.set(passability_tile_idx);
+
                     let (hp, is_mature) = match object {
                         Object::Pine => (PINE_HP_MAX, true),
                         Object::Oak => (OAK_HP_MAX, true),
@@ -317,6 +359,7 @@ impl GameStage {
         if self.current_frame % GROW_TICKS == 0 {
             self.grow_trees();
         }
+        self.update_paths();
         self.current_frame += 1;
     }
 
@@ -405,10 +448,49 @@ impl GameStage {
         self.rnd_gen = rng;
     }
 
+    fn update_paths(&mut self) {
+        let (mx, my) = unsafe{
+            ((*super::wasm4::MOUSE_X) / 4, (*super::wasm4::MOUSE_Y) / 4)
+        };
+        if !((0..40).contains(&mx) && (0..40).contains(&my)) {
+            return;
+        }
+        let mut pvec = std::mem::take(&mut self.mouse_path);
+        pvec.clear();
+        self.find_path((17, 11), (mx as u8, my as u8), &mut pvec);
+        self.mouse_path = pvec;
+    }
+
     pub fn render(&mut self) {
         self.render_ripples();
         self.tilemap.draw();
         self.render_objects();
+
+        if !self.mouse_path.is_empty() {
+            unsafe {*super::wasm4::DRAW_COLORS = 4;}
+            let (mut cx, mut cy) = (68, 44);
+            for dir in self.mouse_path.iter() {
+                match dir {
+                    Direction::None => {}
+                    Direction::Up => {
+                        super::wasm4::line(cx, cy, cx, cy - 4);
+                        cy -= 4;
+                    }
+                    Direction::Down => {
+                        super::wasm4::line(cx, cy, cx, cy + 4);
+                        cy += 4;
+                    }
+                    Direction::Left => {
+                        super::wasm4::line(cx - 4, cy, cx, cy);
+                        cx -= 4;
+                    }
+                    Direction::Right => {
+                        super::wasm4::line(cx + 4, cy, cx, cy);
+                        cx += 4;
+                    }
+                }
+            }
+        }
     }
 
     fn render_ripples(&self) {
@@ -456,6 +538,81 @@ impl GameStage {
 
         for (object, (x, y)) in self.render_buffer.drain(..) {
             object.blit(x as i32, y as i32);
+        }
+    }
+
+    fn clear_visit_set(&mut self) {
+        self.visited_fields.fill(0);
+    }
+
+    fn is_passable(&self, coord: (u8, u8)) -> bool {
+        !self.obstacles.test(coord.1 as usize * 40 + coord.0 as usize)
+    }
+
+    fn get_next_path_dir(&self, coord: (u8, u8)) -> Direction {
+        self.path_buffer[coord.1 as usize * 40 + coord.0 as usize]
+    }
+
+    fn set_visited(&mut self, coord: (u8, u8), dir: Direction) {
+        let idx = coord.1 as usize * 40 + coord.0 as usize;
+        self.visited_fields.set(idx);
+        self.path_buffer[idx] = dir;
+    }
+
+    fn is_visited(&self, coord: (u8, u8)) -> bool {
+        let idx = coord.1 as usize * 40 + coord.0 as usize;
+        self.visited_fields.test(idx)
+    }
+
+    // breadth first search
+    fn find_path(&mut self, start: (u8, u8), end: (u8, u8), out_vec: &mut Vec<Direction>) {
+        if !self.is_passable(start) || !self.is_passable(end) {
+            return;
+        }
+        if start.0 == end.0 && start.1 == end.1 {
+            return;
+        }
+        self.clear_visit_set();
+        self.path_buffer.fill(Direction::None);
+        self.path_queue.clear();
+        self.path_queue.push_front((end, Direction::None));
+        while let Some((next_pos, dir)) = self.path_queue.pop_back() {
+            let (cx, cy) = next_pos;
+            if self.is_visited(next_pos) { continue; }
+            self.set_visited(next_pos, dir);
+            if cx == start.0 && cy == start.1 { break; }
+            for (cond, pos, dir) in [
+                (cx > 0, (cx - 1, cy), Direction::Right),
+                (cx < 39, (cx + 1, cy), Direction::Left),
+                (cy > 0, (cx, cy - 1), Direction::Down),
+                (cy < 39, (cx, cy + 1), Direction::Up)
+            ] {
+                if cond && self.is_passable(pos) && !self.is_visited(pos) {
+                    self.path_queue.push_front((pos, dir));
+                }
+            }
+        }
+        let (mut cur_x, mut cur_y) = start;
+        while cur_x != end.0 || cur_y != end.1 {
+            match self.get_next_path_dir((cur_x, cur_y)) {
+                Direction::None => { return; },
+                Direction::Up => {
+                    out_vec.push(Direction::Up);
+                    cur_y -= 1;
+                },
+                Direction::Down => {
+                    out_vec.push(Direction::Down);
+                    cur_y += 1;
+                },
+                Direction::Left => {
+                    out_vec.push(Direction::Left);
+                    cur_x -= 1;
+                },
+                Direction::Right => {
+                    out_vec.push(Direction::Right);
+                    cur_x += 1;
+                },
+            }
         }
     }
 }

@@ -3,6 +3,12 @@
 version = 3
 
 [[package]]
+name = "bitsetium"
+version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8603c1e6e332320ea9609f83b1a848ed5fe8c688c9872b0022baf299f60c966a"
+
+[[package]]
 name = "buddy-alloc"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12,6 +18,7 @@ checksum = "8ff9f338986406db85e2b5deb40a9255b796ca03a194c7457403d215173f3fd5"
 name = "cart"
 version = "0.1.0"
 dependencies = [
+ "bitsetium",
  "buddy-alloc",
  "lazy_static",
 ]
