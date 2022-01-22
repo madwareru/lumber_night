@@ -36,7 +36,7 @@ impl Object {
                 tile.blit_as_sprite(x - 4, y - 8);
             },
             Object::Stump => {
-                let tile = &crate::sprites::TILES[53];
+                let tile = &crate::sprites::TILES[44];
                 tile.blit_as_sprite(x - 4, y - 4);
             },
             Object::BigHouse => {
@@ -55,8 +55,7 @@ impl Object {
                     x - 1,
                     y - 7
                 );
-            },
-            _ => ()
+            }
         }
     }
 }

@@ -1,5 +1,4 @@
-use std::collections::Bound;
-use std::ops::{Range, RangeBounds, RangeInclusive};
+use std::ops::{RangeInclusive};
 
 pub struct RndGen {
     seed: u16
